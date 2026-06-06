@@ -68,6 +68,55 @@ def test_fp_while_true_awaits_method_sibling():
     assert not has(r, "EVL003")
 
 
+def test_fp_method_name_collides_with_module_coroutine():
+    # Found in the wild (langflow): a SYNC method `obj.attr.update_settings(...)`
+    # shares its bare name with a module-level `async def update_settings`. The
+    # bare-suffix resolver must NOT treat the multi-segment attribute call as a
+    # call to the coroutine -> no spurious EVL004 "never awaited".
+    r = run_project({"app/util.py": (
+        "async def update_settings(cache=None):\n"
+        "    svc = get_settings_service()\n"
+        "    svc.settings.update_settings(cache=cache)\n"   # sync method, same name
+    )})
+    assert not has(r, "EVL004"), [f.location() for f in find_all(r, "EVL004")]
+
+
+def test_fp_method_name_collides_with_module_function_sibling():
+    # sibling (EVL001 variant): a sync method `self.db.query(...)` collides with a
+    # module-level helper `query()` that itself reaches a blocker. The instance
+    # method call must not be resolved to the module function.
+    r = run_project({
+        "app/db.py": (
+            "import time\n"
+            "def query():\n"
+            "    time.sleep(1)\n"               # module-level blocker
+        ),
+        "app/main.py": (
+            "async def handler(self):\n"
+            "    self.repo.query()\n"           # instance method, same bare name
+        ),
+    })
+    assert not has(r, "EVL001"), [f.location() for f in find_all(r, "EVL001")]
+
+
+def test_fn_module_function_still_resolves_after_collision_guard():
+    # Guard against over-correction: a genuine cross-root module-function call
+    # (`from app.service import fetch; fetch()`) MUST still resolve and flag.
+    r = run_project({
+        "app/service.py": (
+            "import time\n"
+            "def fetch():\n"
+            "    time.sleep(1)\n"
+        ),
+        "app/main.py": (
+            "from app.service import fetch\n"
+            "async def handler():\n"
+            "    fetch()\n"
+        ),
+    })
+    assert has(r, "EVL001"), "bare imported module-function call must still resolve"
+
+
 # === FALSE NEGATIVES (must flag) ===========================================
 
 def test_fn_constructor_init_blocker():

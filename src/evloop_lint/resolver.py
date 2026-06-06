@@ -205,25 +205,40 @@ class ProjectIndex:
             # maybe imported: from x import f
             if dotted in self.functions_by_qual:
                 return self.functions_by_qual[dotted]
-            return self._suffix_resolve(dotted)
+            return self._suffix_resolve(dotted, chain_len=len(chain))
         # dotted module.func -> look up by (module, name)
         target_mod = ".".join(dotted.split(".")[:-1])
         target_name = dotted.split(".")[-1]
         f = self.functions_by_module_name.get((target_mod, target_name))
         if f is not None:
             return f
-        return self._suffix_resolve(dotted)
+        return self._suffix_resolve(dotted, chain_len=len(chain))
 
-    def _suffix_resolve(self, dotted: str):
+    def _suffix_resolve(self, dotted: str, chain_len: int = 1):
         """Cross-root fallback: match an import target like ``app.service.fetch``
         to a function indexed as ``service.fetch`` (root-prefix ambiguity when the
         analyzed tree is not itself the import root). Pick the LONGEST suffix that
-        resolves to exactly one function (unambiguous)."""
+        resolves to exactly one function (unambiguous).
+
+        A module-level function is only ever reached cross-root through a suffix
+        that still names its containing module (e.g. ``service.fetch``), never
+        through a *bare* function name. So a bare 1-segment suffix may satisfy only
+        a 1-segment call (an imported/global name like ``fetch()``). When the call
+        site is a multi-segment ATTRIBUTE access (``obj.attr.method()``), matching
+        the bare trailing name to a same-named module-level ``def`` is a name
+        collision, not a real edge — those must fall through to Tier-3 method
+        matching against actual methods instead. (Guards EVL004/EVL001 FPs from a
+        sync method colliding with a module-level coroutine of the same name.)"""
         if not dotted:
             return None
         parts = dotted.split(".")
+        # Bare trailing name is only a valid module-function suffix for a bare call.
+        min_suffix_len = 1 if chain_len <= 1 else 2
         for cut in range(len(parts)):
-            suffix = ".".join(parts[cut:])
+            suffix_parts = parts[cut:]
+            if len(suffix_parts) < min_suffix_len:
+                continue
+            suffix = ".".join(suffix_parts)
             if suffix == dotted:
                 continue  # already tried as full dotted
             cands = self.qual_by_suffix.get(suffix)
