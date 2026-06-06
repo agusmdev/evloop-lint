@@ -71,6 +71,11 @@ class ProjectIndex:
         self.init_by_class_qual: dict = {}       # class qualname -> __init__ FunctionIR
         self.dunder_by_class_qual: dict = {}     # (class qualname, dunder) -> FunctionIR
         self.properties_by_name: dict = {}       # property getter name -> [FunctionIR]
+        # Resolution memo. A CallIR is owned by exactly one function/module, so it
+        # always resolves in the same (module, func) context regardless of how many
+        # times the taint walk re-visits its owner (dual-context, multiple paths).
+        # Keying on id(call) is therefore sound and collapses ~1M resolve_call hits.
+        self._resolve_memo: dict = {}            # id(CallIR) -> Resolution
         for m in modules:
             self._index_module(m)
 
@@ -133,6 +138,14 @@ class ProjectIndex:
 
     # ---- public resolution --------------------------------------------------
     def resolve_call(self, call: CallIR, in_module: ModuleIR, in_func: FunctionIR) -> Resolution:
+        cached = self._resolve_memo.get(id(call))
+        if cached is not None:
+            return cached
+        res = self._resolve_call_uncached(call, in_module, in_func)
+        self._resolve_memo[id(call)] = res
+        return res
+
+    def _resolve_call_uncached(self, call: CallIR, in_module: ModuleIR, in_func: FunctionIR) -> Resolution:
         chain = call.func_chain
 
         # Callee is a call result (factory().method()) or otherwise dynamic.
