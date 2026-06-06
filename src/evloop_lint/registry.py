@@ -126,39 +126,57 @@ class Registry:
             return True
         return dotted_target.endswith("." + key)
 
-    def match_blocker(self, dotted_target: str) -> BlockerSpec | None:
-        spec = self.blockers.get(dotted_target)
+    @staticmethod
+    def _proper_suffixes(dotted_target: str):
+        """Yield the proper trailing suffixes of ``dotted_target`` (every tail
+        starting after a '.'), longest first. Matching ``dotted_target`` against a
+        key ``k`` via ``dotted_target.endswith("." + k)`` is equivalent to ``k``
+        being one of these suffixes — so we can probe the registry dict with O(1)
+        lookups per suffix instead of scanning every key with ``endswith``.
+        ``len(dotted_target)`` calls became a handful (= number of segments)."""
+        start = 0
+        n = len(dotted_target)
+        while True:
+            dot = dotted_target.find(".", start)
+            if dot == -1:
+                return
+            yield dotted_target[dot + 1:]
+            start = dot + 1
+
+    def _match_suffix(self, table: dict, dotted_target: str, *, require_dotted_key: bool):
+        """Inverted suffix match against ``table``: exact hit first, then each
+        proper trailing suffix. Equivalent to the old all-keys ``endswith`` scan,
+        but O(segments) dict lookups instead of O(registry) string compares.
+
+        ``require_dotted_key`` reproduces the blocker-only ``"." in key`` guard:
+        a bare (dot-free) suffix is not allowed to match (only multi-segment keys).
+        For suffixes that's automatic — every proper suffix except the last bare
+        segment contains a dot — but we still skip the final bare segment when
+        required, preserving the original semantics exactly."""
+        spec = table.get(dotted_target)
         if spec is not None:
             return spec
-        for key, spec in self.blockers.items():
-            if "." in key and self._suffix_match(dotted_target, key):
+        for suffix in self._proper_suffixes(dotted_target):
+            if require_dotted_key and "." not in suffix:
+                continue
+            spec = table.get(suffix)
+            if spec is not None:
                 return spec
         return None
+
+    def match_blocker(self, dotted_target: str) -> BlockerSpec | None:
+        return self._match_suffix(self.blockers, dotted_target, require_dotted_key=True)
 
     def match_offload(self, dotted_target: str) -> OffloadSpec | None:
-        spec = self.offloads.get(dotted_target)
-        if spec is not None:
-            return spec
-        for key, spec in self.offloads.items():
-            if self._suffix_match(dotted_target, key):
-                return spec
-        return None
+        return self._match_suffix(self.offloads, dotted_target, require_dotted_key=False)
 
     def match_scheduler(self, dotted_target: str) -> ScheduleOnLoopSpec | None:
-        spec = self.schedulers.get(dotted_target)
-        if spec is not None:
-            return spec
-        for key, spec in self.schedulers.items():
-            if self._suffix_match(dotted_target, key):
-                return spec
-        return None
+        return self._match_suffix(self.schedulers, dotted_target, require_dotted_key=False)
 
     def is_yielding_await(self, dotted_target: str) -> bool:
         if dotted_target in self.yielding_awaits:
             return True
-        return any(
-            self._suffix_match(dotted_target, k) for k in self.yielding_awaits
-        )
+        return any(s in self.yielding_awaits for s in self._proper_suffixes(dotted_target))
 
 
 def default_registry() -> Registry:
