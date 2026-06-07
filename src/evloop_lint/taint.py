@@ -34,6 +34,9 @@ from .resolver import (
 )
 
 
+_MISS = object()  # sentinel for "not yet cached" (None is a valid cached result)
+
+
 def _min_conf(a: Confidence, b: Confidence) -> Confidence:
     """The lower (less certain) of two confidence tiers."""
     return a if a.rank <= b.rank else b
@@ -49,6 +52,7 @@ class TaintWalker:
         # for emission (we always need the witness chain on first reach), but we
         # use a cheap prune cache (qualname -> reaches any blocker ignoring tags).
         self._prune_cache: dict = {}
+        self._module_of_cache: dict = {}    # func.qualname -> ModuleIR | None
 
     # ---- entry ------------------------------------------------------------
     def run(self):
@@ -164,14 +168,20 @@ class TaintWalker:
                    chain=chain + [step], stack=stack, min_conf=min_conf)
 
     def _module_of(self, func: FunctionIR):
-        mod_name = func.qualname
+        # Pure function of func.qualname; cached (called once per call hop).
+        cached = self._module_of_cache.get(func.qualname, _MISS)
+        if cached is not _MISS:
+            return cached
         # strip trailing .name and (optional) .Class to find an indexed module
         parts = func.qualname.split(".")
+        result = None
         for cut in range(len(parts) - 1, 0, -1):
             candidate = ".".join(parts[:cut])
             if candidate in self.index.modules:
-                return self.index.modules[candidate]
-        return None
+                result = self.index.modules[candidate]
+                break
+        self._module_of_cache[func.qualname] = result
+        return result
 
     # ---- offload / scheduler ----------------------------------------------
     def _handle_offload(self, call, res, func, module, entry, entry_module, chain, depth, stack, min_conf):
